@@ -10,8 +10,10 @@ This plugin currently supports two main drive configurations:
 1. **Four-Wheel Complete Swerve:** All four wheels can steer independently and drive.
 2. **Six-Wheel Drive:** Only the four corner wheels steer (swerve), while the other two middle wheels are rigid and only drive.
 
-<img src="assets/four_wheel.png" alt="Four Weel Drive">
-<img src="assets/six_wheel.png" alt="Six Wheel Drive">
+<div style="display: inline-block;">
+  <img src="assets/four_wheel.png" alt="Four Weel Drive">
+  <img src="assets/six_wheel.png" alt="Six Wheel Drive">
+</div>
 
 ## Prerequisites
 
