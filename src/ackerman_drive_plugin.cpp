@@ -20,6 +20,7 @@ class AckermanDrivePluginPrivate{};
     }
 
     AckermanDrivePlugin::~AckermanDrivePlugin() {
+        updateConnection_.reset();
         if (this->rosThread_.joinable()){
             rclcpp::shutdown();
             this->rosThread_.join();
@@ -50,6 +51,11 @@ class AckermanDrivePluginPrivate{};
                 paramNotSpecified = true;
                 std::cout << RED << "Parameter " << paramName << " not specified in plugin!" << RESET << std::endl;
             }
+        }
+
+        if (!swere_drive::ParseBoolean(generalParams["sixWheel"], sixWheel_)) {
+            RCLCPP_ERROR(rosNode_->get_logger(), "sixWheel must be true, false, 1, or 0");
+            return;
         }
 
         // Get Tune Params from sdf
@@ -85,6 +91,7 @@ class AckermanDrivePluginPrivate{};
             if (sdf->HasElement(paramName)) {
                 std::string joint_name = sdf->Get<std::string>(paramName);
                 param.second = InitializeStepperJoint(joint_name, stepperP, stepperI, stepperD);
+                if (!param.second) paramNotSpecified = true;
             } else {
                 paramNotSpecified = true;
                 std::cout << RED << "Parameter " << paramName << " not specified in plugin!" << RESET << std::endl;
@@ -97,17 +104,19 @@ class AckermanDrivePluginPrivate{};
             if (sdf->HasElement(paramName)) {
                 std::string joint_name = sdf->Get<std::string>(paramName);
                 param.second = InitializeWheelJoint(joint_name, wheelP, wheelI, wheelD);
+                if (!param.second) paramNotSpecified = true;
             } else {
                 paramNotSpecified = true;
                 std::cout << RED << "Parameter " << paramName << " not specified in plugin!" << RESET << std::endl;
             }
         }
-        if(generalParams["sixWheel"] == "1"){
+        if(sixWheel_){
             for(auto& param : this->wheelJointParams1){
                 const std::string& paramName = param.first;
                 if (sdf->HasElement(paramName)) {
                     std::string joint_name = sdf->Get<std::string>(paramName);
                     param.second = InitializeWheelJoint(joint_name, wheelP, wheelI, wheelD);
+                    if (!param.second) paramNotSpecified = true;
                 } else {
                     paramNotSpecified = true;
                     std::cout << RED << "Parameter " << paramName << " not specified in plugin!" << RESET << std::endl;
@@ -115,14 +124,27 @@ class AckermanDrivePluginPrivate{};
             }
         }
         if(paramNotSpecified)return;
+        for (const auto &param : robotParams) {
+            if (!std::isfinite(param.second) || param.second <= 0) {
+                RCLCPP_ERROR(rosNode_->get_logger(), "Robot dimensions must be finite and positive");
+                return;
+            }
+        }
+        const double updateRate = std::stod(generalParams["updateRate"]);
+        if (!std::isfinite(updateRate) || updateRate <= 0 || updateRate > 1000) {
+            RCLCPP_ERROR(rosNode_->get_logger(), "updateRate must be in (0, 1000] Hz");
+            return;
+        }
         this->cmdVelSub_ = this->rosNode_->create_subscription<geometry_msgs::msg::Twist>(this->generalParams["commandTopic"],10,std::bind(&AckermanDrivePlugin::OnCmdVelReceived, this, std::placeholders::_1));
         std::cout << GREEN << "Subscribed to " << generalParams["commandTopic"] << " Topic!" << RESET << std::endl;
-        this->Odompublisher_ = this->rosNode_->create_publisher<nav_msgs::msg::Odometry>(this->generalParams["odometryTopic"], stoi(this->generalParams["updateRate"]));
+        this->Odompublisher_ = this->rosNode_->create_publisher<nav_msgs::msg::Odometry>(this->generalParams["odometryTopic"], 10);
         auto timer_callback = std::bind(&AckermanDrivePlugin::publishOdom, this);
-        this->odom_timer_ = this->rosNode_->create_wall_timer(std::chrono::milliseconds(1000/stoi(generalParams["updateRate"])),timer_callback);
+        this->odom_timer_ = this->rosNode_->create_wall_timer(std::chrono::duration<double>(1.0 / updateRate),timer_callback);
 
         SetStepperJointPosition(0,0,0,0);
         SetWheelJointVelocity(0,0,0,0,0,0);
+        updateConnection_ = event::Events::ConnectWorldUpdateBegin(
+            std::bind(&AckermanDrivePlugin::OnUpdate, this));
         this->rosThread_ = std::thread([this]() { rclcpp::spin(this->rosNode_); });
     }
 
@@ -160,7 +182,7 @@ class AckermanDrivePluginPrivate{};
         // velocity is in rad/s
         this->model->GetJointController()->SetVelocityTarget(this->wheelJointParams["back_left_wheel_joint"]->GetScopedName(), velocity5);
         this->model->GetJointController()->SetVelocityTarget(this->wheelJointParams["back_right_wheel_joint"]->GetScopedName(), velocity6);
-        if(generalParams["sixWheel"] == "1"){
+        if(sixWheel_){
             this->model->GetJointController()->SetVelocityTarget(this->wheelJointParams1["middle_left_wheel_joint"]->GetScopedName(), velocity3);
             this->model->GetJointController()->SetVelocityTarget(this->wheelJointParams1["middle_right_wheel_joint"]->GetScopedName(), velocity4);
         }
@@ -168,6 +190,7 @@ class AckermanDrivePluginPrivate{};
         this->model->GetJointController()->SetVelocityTarget(this->wheelJointParams["front_right_wheel_joint"]->GetScopedName(), velocity2);
     }
     void AckermanDrivePlugin::OnCmdVelReceived(const std::shared_ptr<const geometry_msgs::msg::Twist> msg){
+        std::lock_guard<std::mutex> lock(commandMutex_);
         float linear_x = msg->linear.x;
         float angular_z = msg->angular.z;
         float linear_y = msg->linear.y;
@@ -177,11 +200,22 @@ class AckermanDrivePluginPrivate{};
         const float wheel_separation = robotParams["wheelSeperation"]; // Distance between left and right wheels in meters
         const float wheel_base = robotParams["wheelBase"]; // Distance between front and rear axles in meters
 
-        if(linear_y != 0 && linear_x == 0 && generalParams["sixWheel"] == "false"){
+        if (!std::isfinite(linear_x) || !std::isfinite(linear_y) || !std::isfinite(angular_z)) {
+            crabTransition_.Cancel();
+            SetWheelJointVelocity(0,0,0,0,0,0);
+            return;
+        }
+        const bool crab = linear_y != 0 && linear_x == 0 && angular_z == 0 && !sixWheel_;
+        if (!crab) crabTransition_.Cancel();
+        if(crab){
             float rads = linear_y / wheel_radius; // here v = wr
             SetStepperJointPosition(1.57, 1.57, 1.57, 1.57);
-            common::Time::MSleep(1500);
-            SetWheelJointVelocity(rads,rads,0,0,rads,rads);
+            crabTransition_.Begin(model->GetWorld()->SimTime().Double(), rads);
+            if (crabTransition_.Ready(model->GetWorld()->SimTime().Double())) {
+                SetWheelJointVelocity(rads,rads,0,0,rads,rads);
+            } else {
+                SetWheelJointVelocity(0,0,0,0,0,0);
+            }
         }else if(msg->angular.z == 0){
             float rads = msg->linear.x / wheel_radius; // Radius here v = wr
             SetStepperJointPosition(0,0,0,0);
@@ -225,6 +259,14 @@ class AckermanDrivePluginPrivate{};
         }
 
     }
+    void AckermanDrivePlugin::OnUpdate(){
+        std::lock_guard<std::mutex> lock(commandMutex_);
+        if (crabTransition_.Ready(model->GetWorld()->SimTime().Double())) {
+            const float rads = crabTransition_.Speed();
+            SetWheelJointVelocity(rads,rads,0,0,rads,rads);
+        }
+    }
+
     void AckermanDrivePlugin::publishOdom(){
         // Has to Implement custom Reverse Kinematics, for time being I'm using gazebo co-ordinates
         ignition::math::Pose3d pose = this->model->WorldPose();

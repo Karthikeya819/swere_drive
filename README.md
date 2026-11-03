@@ -1,8 +1,8 @@
-# Ackerman Drive Plugin (Swere Drive)
+# Swerve Drive for ROS 2 and Gazebo Classic
 
-This package provides a Gazebo Classic plugin for a 4-wheel or 6-wheel Ackerman/Swerve drive robot. It is built for ROS2 Humble and Gazebo Classic. *(Note: If you plan to use modern Gazebo/Ignition in the future, you will need `ros_gz` dependencies. For Gazebo Classic, this uses `gazebo_ros_pkgs`.)*
+A C++ Gazebo Classic model plugin for four-wheel steering and six-wheel drive robots. Send `geometry_msgs/msg/Twist` commands on `cmd_vel`; the plugin controls steering and wheel joints with PID controllers and publishes simulation ground-truth odometry on `odom`.
 
-When you run this plugin in your simulation, it subscribes to a `geometry_msgs/Twist` topic (like `cmd_vel`) to get the desired linear and angular speeds. It calculates the exact turning radii for each wheel using Ackerman steering geometry, which also supports crab steering (moving sideways) if your `cmd_vel` has movement on the Y-axis. The plugin then turns the 4 steering (stepper) joints to the correct angles using a Position PID controller, and spins the driving wheels at the correct speeds using a Velocity PID controller. Finally, it publishes `nav_msgs/Odometry` data to track the robot's position in the simulation world.
+**Target stack:** Ubuntu 22.04, ROS 2 Humble, Gazebo Classic 11. This is a Gazebo Classic plugin, not a modern Gazebo (`ros_gz`) system plugin. The ROS package and repository retain the original `swere_drive` spelling.
 
 ## Supported Drive Systems
 
@@ -11,18 +11,19 @@ This plugin currently supports two main drive configurations:
 2. **Six-Wheel Drive:** Only the four corner wheels steer (swerve), while the other two middle wheels are rigid and only drive.
 
 <div style="display: inline-block;">
-  <img src="assets/four_wheel.png" alt="Four Weel Drive">
+  <img src="assets/four_wheel.png" alt="Four-Wheel Drive">
   <img src="assets/six_wheel.png" alt="Six Wheel Drive">
 </div>
 
 ## Prerequisites
 
-Make sure you have the required ROS2 and Gazebo dependencies installed:
+Start with ROS 2 Humble installed and sourced. Install the build tools and simulator dependencies:
 
 ```bash
 sudo apt update
-sudo apt install ros-humble-gazebo-ros-pkgs ros-humble-gazebo-ros 
-sudo apt install ros-humble-teleop-twist-keyboard
+sudo apt install python3-colcon-common-extensions python3-rosdep \
+  ros-humble-gazebo-ros-pkgs ros-humble-robot-state-publisher \
+  ros-humble-teleop-twist-keyboard
 ```
 
 ## How to Install and Build
@@ -42,6 +43,7 @@ git clone https://github.com/Karthikeya819/swere_drive.git
 ```bash
 cd ~/sim_ws
 source /opt/ros/humble/setup.bash
+rosdep install --from-paths src --ignore-src -r -y
 colcon build --packages-select swere_drive
 ```
 
@@ -67,6 +69,50 @@ To drive the robot around, open a **new terminal**, source ROS2, and run the tel
 source /opt/ros/humble/setup.bash
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
+
+## Behavior and limitations
+
+- Four-wheel mode supports forward/reverse motion, turning, and pure sideways crab commands (`linear.y` with zero `linear.x` and `angular.z`). Mixed lateral commands are not general holonomic swerve kinematics.
+- Six-wheel mode has four steering corner wheels and two fixed middle wheels. Sideways crab motion is unsupported.
+- `sixWheel` accepts `true`/`false` (case-insensitive) and `1`/`0`; it defaults to false. Six-wheel mode requires both middle-wheel joint names.
+- Entering crab mode holds wheel speeds at zero for 1.5 seconds of simulation time while steering aligns. Completion is checked on each Gazebo physics update, independently of the wall-time odometry rate, and takes effect on the first update at or after the deadline. This is nonblocking: odometry continues and a newer stop or non-crab command cancels the pending drive. Repeated crab commands update the speed without restarting the delay. This remains a fixed delay, not steering-feedback verification.
+- Odometry uses Gazebo world pose, not wheel encoder integration. No odometry TF broadcaster or command watchdog is provided. Send an explicit zero command to stop.
+- The existing turning equations are experimental; validate geometry and motion in simulation before adapting the controller to hardware.
+
+### Quick smoke check
+
+After launching either model, in another sourced terminal:
+
+```bash
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.2}}'
+ros2 topic echo /odom --once
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist '{}'
+```
+
+For four-wheel mode, send a pure lateral command and then a stop during the steering delay. Verify that odometry keeps arriving and that no stale lateral command starts after the stop:
+
+```bash
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist '{linear: {y: 0.2}}'
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist '{}'
+```
+
+### Tests
+
+```bash
+colcon test --packages-select swere_drive
+colcon test-result --verbose
+```
+
+The command-state regression tests can also run without ROS or Gazebo:
+
+```bash
+g++ -std=c++14 -Wall -Wextra -Werror -Iinclude \
+  test/test_drive_command_utils.cpp -o /tmp/test_drive_command_utils
+/tmp/test_drive_command_utils
+python3 -m unittest discover -s test -p 'test_*.py'
+```
+
+If the plugin cannot be found, source `install/setup.bash` in the launch terminal and confirm that `libackerman_drive_plugin.so` exists under `install/swere_drive/lib`. If dependency resolution fails on a fresh ROS setup, initialize rosdep once with `sudo rosdep init`, then run `rosdep update`. Keep the historical `wheelSeperation` parameter spelling when configuring the plugin.
 
 ## Plugin Configuration Examples
 

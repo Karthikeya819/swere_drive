@@ -14,6 +14,10 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <memory>
+#include <thread>
+#include <mutex>
+#include <gazebo/common/Events.hh>
+#include <swere_drive/drive_command_utils.hpp>
 
 namespace gazebo{
     class AckermanDrivePluginPrivate;
@@ -30,8 +34,13 @@ namespace gazebo{
         void SetWheelJointVelocity(float velocity1, float velocity2, float velocity3, float velocity4, float velocity5, float velocity6);
         void OnCmdVelReceived(const std::shared_ptr<const geometry_msgs::msg::Twist> msg);
         void publishOdom();
+        void OnUpdate();
 
     private:
+        std::mutex commandMutex_;
+        event::ConnectionPtr updateConnection_;
+        bool sixWheel_ = false;
+        swere_drive::CrabTransition crabTransition_;
         std::unique_ptr<AckermanDrivePluginPrivate> impl_;
         physics::ModelPtr model;
         std::map<std::string, physics::JointPtr> stepperJointParams = {{"front_left_stepper_joint", NULL},{"front_right_stepper_joint", NULL},{"back_left_stepper_joint", NULL},{"back_right_stepper_joint", NULL},};

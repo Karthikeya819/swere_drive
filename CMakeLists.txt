@@ -8,6 +8,7 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(gazebo_ros REQUIRED)
+find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -35,7 +36,7 @@ target_include_directories(ackerman_drive_plugin PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(ackerman_drive_plugin
-    "gazebo_ros" geometry_msgs nav_msgs tf2 tf2_geometry_msgs
+    "gazebo_ros" rclcpp geometry_msgs nav_msgs tf2 tf2_geometry_msgs
 )
 ament_export_libraries(ackerman_drive_plugin)
 install(TARGETS
@@ -46,6 +47,11 @@ install(TARGETS
 )
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(model_configuration test/test_models.py)
+  add_executable(test_drive_command_utils test/test_drive_command_utils.cpp)
+  target_include_directories(test_drive_command_utils PRIVATE include)
+  add_test(NAME drive_command_utils COMMAND test_drive_command_utils)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
